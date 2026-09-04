@@ -1,0 +1,5 @@
+/yaml-get
+*.exe
+*.test
+*.out
+.DS_Store
