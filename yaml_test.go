@@ -164,10 +164,28 @@ func TestParseAndLookup(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "sequence of mappings is not supported yet",
-			yaml:    "items:\n  - name: a\n    value: 1\n",
-			path:    "items[0]",
-			wantErr: true,
+			name: "sequence of mappings, first key",
+			yaml: "items:\n  - name: a\n    value: 1\n  - name: b\n    value: 2\n",
+			path: "items[0].name",
+			want: "a",
+		},
+		{
+			name: "sequence of mappings, second item second key",
+			yaml: "items:\n  - name: a\n    value: 1\n  - name: b\n    value: 2\n",
+			path: "items[1].value",
+			want: "2",
+		},
+		{
+			name: "sequence of mappings with nested mapping value",
+			yaml: "items:\n  - name: a\n    tags:\n      env: prod\n      tier: web\n",
+			path: "items[0].tags.env",
+			want: "prod",
+		},
+		{
+			name: "sequence of mappings, extra indent after dash",
+			yaml: "items:\n  -   name: a\n      value: 1\n",
+			path: "items[0].value",
+			want: "1",
 		},
 	}
 

@@ -58,7 +58,8 @@ This is a parser for the subset of YAML that config files actually use,
 not the full spec. It handles:
 
 - block mappings and block sequences, indented with spaces (tabs in
-  indentation are a parse error)
+  indentation are a parse error), including sequences of mappings
+  (`- name: a` followed by more keys at the same indent as `name`)
 - plain, single-quoted, and double-quoted scalars, including `#` comments
   outside of quotes and basic `\n`/`\t`/`\"`/`\\` escapes inside double
   quotes
@@ -67,11 +68,9 @@ not the full spec. It handles:
   a string, so `version: "1.0"` stays `"1.0"`, not `1.0`)
 - duplicate keys, where the last one wins, same as most YAML loaders
 
-It does not handle flow style (`{a: 1}`, `[1, 2]`), anchors/aliases,
-multi-line block scalars (`|`, `>`), or sequences of mappings
-(`- name: a` followed by more keys at the same list item). Feeding it a
-file that uses those will produce a clear parse error rather than a wrong
-answer.
+It does not handle flow style (`{a: 1}`, `[1, 2]`), anchors/aliases, or
+multi-line block scalars (`|`, `>`). Feeding it a file that uses those will
+produce a clear parse error rather than a wrong answer.
 
 ## Building
 

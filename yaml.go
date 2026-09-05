@@ -17,8 +17,8 @@ type line struct {
 }
 
 // Parse reads a restricted subset of YAML: block mappings, block sequences
-// of scalars, and plain/single/double-quoted scalars. It does not support
-// flow style, anchors, tags, multi-line scalars, or sequences of mappings.
+// of scalars or mappings, and plain/single/double-quoted scalars. It does
+// not support flow style, anchors, tags, or multi-line scalars.
 func Parse(src string) (Node, error) {
 	tokens, err := tokenize(src)
 	if err != nil {
@@ -119,7 +119,20 @@ func parseSequence(tokens []line, pos int, indent int) (Node, int, error) {
 			continue
 		}
 		if _, _, ok, _ := splitKeyValue(rest); ok {
-			return nil, pos, fmt.Errorf("line %d: sequences of mappings are not supported", tokens[pos].num)
+			// "- key: value" opens a mapping whose first key lives on the
+			// item line, indented to wherever it sits after "- ". Splice a
+			// synthetic line in its place so parseMapping can walk the rest
+			// of the item's keys, which are indented to match.
+			itemIndent := indent + (len(tokens[pos].text) - len(rest))
+			synthetic := line{indent: itemIndent, text: rest, num: tokens[pos].num}
+			combined := append([]line{synthetic}, tokens[pos+1:]...)
+			val, newPos, err := parseMapping(combined, 0, itemIndent)
+			if err != nil {
+				return nil, pos, err
+			}
+			items = append(items, val)
+			pos += newPos
+			continue
 		}
 		val, err := parseScalar(rest)
 		if err != nil {
