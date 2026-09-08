@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,11 +13,21 @@ import (
 
 func main() {
 	file := flag.String("f", "", "path to YAML file (default: stdin)")
+	var defaultVal string
+	flag.StringVar(&defaultVal, "d", "", "value to print if the path is not found, instead of exiting non-zero")
+	flag.StringVar(&defaultVal, "default", "", "same as -d")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: yaml-get [-f file] <path>")
+		fmt.Fprintln(os.Stderr, "usage: yaml-get [-f file] [-d default] <path>")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	haveDefault := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "d" || f.Name == "default" {
+			haveDefault = true
+		}
+	})
 
 	args := flag.Args()
 	if len(args) != 1 {
@@ -51,6 +62,11 @@ func main() {
 
 	val, err := Lookup(root, segs)
 	if err != nil {
+		var notFound *NotFoundError
+		if haveDefault && errors.As(err, &notFound) {
+			fmt.Println(defaultVal)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "yaml-get: %v\n", err)
 		os.Exit(2)
 	}

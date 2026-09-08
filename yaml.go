@@ -326,6 +326,16 @@ func ParsePath(path string) ([]Segment, error) {
 	return segs, nil
 }
 
+// NotFoundError means the path doesn't resolve against the document, as
+// opposed to the path being malformed or hitting a type mismatch. Callers
+// that want to fall back to a default value on a missing path, but still
+// treat other errors as fatal, can check for this with errors.As.
+type NotFoundError struct {
+	msg string
+}
+
+func (e *NotFoundError) Error() string { return e.msg }
+
 // Lookup walks root following segs and returns the value found there.
 func Lookup(root Node, segs []Segment) (Node, error) {
 	cur := root
@@ -336,7 +346,7 @@ func Lookup(root Node, segs []Segment) (Node, error) {
 		}
 		v, found := m[seg.Key]
 		if !found {
-			return nil, fmt.Errorf("key %q not found", seg.Key)
+			return nil, &NotFoundError{msg: fmt.Sprintf("key %q not found", seg.Key)}
 		}
 		cur = v
 		if seg.HasIndex {
@@ -345,7 +355,7 @@ func Lookup(root Node, segs []Segment) (Node, error) {
 				return nil, fmt.Errorf("cannot index %q: value is not a list", seg.Key)
 			}
 			if seg.Index >= len(list) {
-				return nil, fmt.Errorf("index %d out of range for %q (len %d)", seg.Index, seg.Key, len(list))
+				return nil, &NotFoundError{msg: fmt.Sprintf("index %d out of range for %q (len %d)", seg.Index, seg.Key, len(list))}
 			}
 			cur = list[seg.Index]
 		}

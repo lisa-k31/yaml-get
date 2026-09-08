@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -207,6 +208,35 @@ func TestParseAndLookup(t *testing.T) {
 			}
 			if gotStr != tc.want {
 				t.Errorf("got %q, want %q", gotStr, tc.want)
+			}
+		})
+	}
+}
+
+// TestNotFoundError checks that Lookup reports missing paths with
+// *NotFoundError specifically, so callers can offer a default value for
+// those but still surface type-mismatch errors (e.g. indexing a scalar)
+// as fatal.
+func TestNotFoundError(t *testing.T) {
+	cases := []struct {
+		name        string
+		yaml        string
+		path        string
+		wantNotFund bool
+	}{
+		{"missing key", "name: value\n", "missing", true},
+		{"index out of range", "list:\n  - a\n  - b\n", "list[5]", true},
+		{"descending into a scalar", "name: value\n", "name.sub", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := lookupValue(tc.yaml, tc.path)
+			if err == nil {
+				t.Fatalf("expected error, got none")
+			}
+			var notFound *NotFoundError
+			if got := errors.As(err, &notFound); got != tc.wantNotFund {
+				t.Errorf("errors.As(err, *NotFoundError) = %v, want %v (err: %v)", got, tc.wantNotFund, err)
 			}
 		})
 	}

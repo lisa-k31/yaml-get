@@ -33,6 +33,17 @@ yaml-get: key "missing" not found
 exit: 2
 ```
 
+Pass `-d`/`--default` to get a fallback value instead, for paths that are
+optional in the config:
+
+```
+$ yaml-get -f config.yaml -d 9090 server.missing
+9090
+```
+
+`-d` only kicks in when the path doesn't resolve. It does not suppress
+errors from a malformed file or from indexing into a scalar.
+
 ## Path syntax
 
 Paths are dot-separated keys. Use `key[N]` to index into a list. A literal
