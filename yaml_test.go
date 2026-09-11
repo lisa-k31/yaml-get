@@ -188,6 +188,72 @@ func TestParseAndLookup(t *testing.T) {
 			path: "items[0].value",
 			want: "1",
 		},
+		{
+			name: "literal block scalar",
+			yaml: "msg: |\n  line one\n  line two\n",
+			path: "msg",
+			want: "line one\nline two\n",
+		},
+		{
+			name: "literal block scalar strip chomping",
+			yaml: "msg: |-\n  line one\n  line two\n",
+			path: "msg",
+			want: "line one\nline two",
+		},
+		{
+			name: "literal block scalar keep chomping preserves trailing blanks",
+			yaml: "msg: |+\n  a\n  b\n\n\nother: c\n",
+			path: "msg",
+			want: "a\nb\n\n\n",
+		},
+		{
+			name: "folded block scalar",
+			yaml: "msg: >\n  this will be\n  folded into\n  one line\n",
+			path: "msg",
+			want: "this will be folded into one line\n",
+		},
+		{
+			name: "folded block scalar keeps blank line as break",
+			yaml: "msg: >\n  first para\n\n  second para\n",
+			path: "msg",
+			want: "first para\nsecond para\n",
+		},
+		{
+			name: "folded block scalar keeps more-indented lines literal",
+			yaml: "msg: >\n  normal\n    literal\n  normal again\n",
+			path: "msg",
+			want: "normal\n  literal\nnormal again\n",
+		},
+		{
+			name: "block scalar with explicit indentation indicator",
+			yaml: "msg: |2\n    four spaces kept\n  two spaces stripped\n",
+			path: "msg",
+			want: "  four spaces kept\ntwo spaces stripped\n",
+		},
+		{
+			name: "block scalar followed by a sibling key",
+			yaml: "msg: |\n  line one\n  line two\nother: value\n",
+			path: "other",
+			want: "value",
+		},
+		{
+			name: "empty block scalar",
+			yaml: "msg: |\nother: value\n",
+			path: "msg",
+			want: "",
+		},
+		{
+			name: "block scalar as a sequence item",
+			yaml: "notes:\n  - |\n    first note\n  - second note\n",
+			path: "notes[0]",
+			want: "first note\n",
+		},
+		{
+			name: "block scalar as first key of a sequence-of-mappings item",
+			yaml: "items:\n  - text: |\n      hello\n      world\n    id: 1\n",
+			path: "items[0].text",
+			want: "hello\nworld\n",
+		},
 	}
 
 	for _, tc := range cases {

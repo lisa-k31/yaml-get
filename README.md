@@ -78,10 +78,31 @@ not the full spec. It handles:
   usual YAML core schema rules for plain scalars (quoting a value keeps it
   a string, so `version: "1.0"` stays `"1.0"`, not `1.0`)
 - duplicate keys, where the last one wins, same as most YAML loaders
+- literal (`|`) and folded (`>`) block scalars, as a mapping value or a
+  sequence item, with chomping indicators (`|-`, `|+`, `>-`, `>+`) and an
+  explicit indentation indicator (`|2`, `>-2`, ...)
 
-It does not handle flow style (`{a: 1}`, `[1, 2]`), anchors/aliases, or
-multi-line block scalars (`|`, `>`). Feeding it a file that uses those will
-produce a clear parse error rather than a wrong answer.
+```
+$ cat notes.yaml
+message: |
+  line one
+  line two
+summary: >
+  this will be
+  folded into
+  one line
+
+$ yaml-get -f notes.yaml message
+line one
+line two
+
+$ yaml-get -f notes.yaml summary
+this will be folded into one line
+```
+
+It does not handle flow style (`{a: 1}`, `[1, 2]`) or anchors/aliases.
+Feeding it a file that uses those will produce a clear parse error rather
+than a wrong answer.
 
 ## Building
 

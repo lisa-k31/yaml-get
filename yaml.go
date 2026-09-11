@@ -14,11 +14,15 @@ type line struct {
 	indent int
 	text   string
 	num    int
+	// block holds the already-assembled value of a "|" or ">" block
+	// scalar opened on this line, or nil if this line is not one.
+	block *string
 }
 
 // Parse reads a restricted subset of YAML: block mappings, block sequences
-// of scalars or mappings, and plain/single/double-quoted scalars. It does
-// not support flow style, anchors, tags, or multi-line scalars.
+// of scalars or mappings, literal/folded block scalars, and
+// plain/single/double-quoted scalars. It does not support flow style,
+// anchors, or tags.
 func Parse(src string) (Node, error) {
 	tokens, err := tokenize(src)
 	if err != nil {
@@ -40,8 +44,8 @@ func Parse(src string) (Node, error) {
 func tokenize(src string) ([]line, error) {
 	raw := strings.Split(src, "\n")
 	var out []line
-	for i, l := range raw {
-		l = strings.TrimSuffix(l, "\r")
+	for i := 0; i < len(raw); i++ {
+		l := strings.TrimSuffix(raw[i], "\r")
 		trimmed := strings.TrimLeft(l, " ")
 		leadWS := l[:len(l)-len(trimmed)]
 		if strings.Contains(leadWS, "\t") {
@@ -54,9 +58,157 @@ func tokenize(src string) ([]line, error) {
 		if content == "" {
 			continue
 		}
-		out = append(out, line{indent: len(leadWS), text: content, num: i + 1})
+		indent := len(leadWS)
+		lineNum := i + 1
+
+		if style, chomp, indentHint, ok := blockScalarIndicator(content); ok {
+			text, next, err := readBlockScalar(raw, i+1, indent, style, chomp, indentHint)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %v", lineNum, err)
+			}
+			out = append(out, line{indent: indent, text: content, num: lineNum, block: &text})
+			i = next - 1
+			continue
+		}
+
+		out = append(out, line{indent: indent, text: content, num: lineNum})
 	}
 	return out, nil
+}
+
+// blockScalarIndicator reports whether content's value position (the part
+// after "key: " and/or a leading "- ") holds a "|" or ">" block scalar
+// header, and if so, its style, chomping indicator, and explicit
+// indentation indicator (0 meaning "auto-detect").
+func blockScalarIndicator(content string) (style byte, chomp byte, indentHint int, ok bool) {
+	candidate := content
+	if isSeqItem(candidate) {
+		candidate = strings.TrimSpace(strings.TrimPrefix(candidate, "-"))
+	}
+	if _, val, hasValue, err := splitKeyValue(candidate); err == nil {
+		if !hasValue {
+			return 0, 0, 0, false
+		}
+		candidate = val
+	}
+	if candidate == "" || (candidate[0] != '|' && candidate[0] != '>') {
+		return 0, 0, 0, false
+	}
+	style = candidate[0]
+	for _, c := range candidate[1:] {
+		switch {
+		case c == '-' || c == '+':
+			if chomp != 0 {
+				return 0, 0, 0, false
+			}
+			chomp = byte(c)
+		case c >= '1' && c <= '9':
+			if indentHint != 0 {
+				return 0, 0, 0, false
+			}
+			indentHint = int(c - '0')
+		default:
+			return 0, 0, 0, false
+		}
+	}
+	return style, chomp, indentHint, true
+}
+
+// readBlockScalar consumes the body of a "|" or ">" scalar starting at
+// raw[start], given the indentation of the line that opened it, and
+// assembles it per the usual chomping and folding rules. It returns the
+// value and the index of the first raw line after the block.
+func readBlockScalar(raw []string, start, headerIndent int, style, chomp byte, indentHint int) (string, int, error) {
+	type contentLine struct {
+		text  string
+		extra bool
+		blank bool
+	}
+
+	blockIndent := -1
+	if indentHint > 0 {
+		blockIndent = headerIndent + indentHint
+	}
+
+	var lines []contentLine
+	lastNonBlank := -1
+	i := start
+	for ; i < len(raw); i++ {
+		l := strings.TrimSuffix(raw[i], "\r")
+		if strings.TrimSpace(l) == "" {
+			lines = append(lines, contentLine{blank: true})
+			continue
+		}
+		ls := len(l) - len(strings.TrimLeft(l, " "))
+		if blockIndent == -1 {
+			if ls <= headerIndent {
+				break
+			}
+			blockIndent = ls
+		}
+		if ls < blockIndent {
+			break
+		}
+		lines = append(lines, contentLine{text: l[blockIndent:], extra: ls > blockIndent})
+		lastNonBlank = len(lines) - 1
+	}
+
+	hasContent := lastNonBlank != -1
+	trailingBlanks := len(lines) - 1 - lastNonBlank
+	if hasContent {
+		lines = lines[:lastNonBlank+1]
+	} else {
+		lines = nil
+	}
+
+	// A single line break between two lines folds to a space in folded
+	// style. A run of N blank lines between them is N+1 line breaks in
+	// literal style (each blank line is itself a line) but just N in
+	// folded style, since one of those breaks is the fold itself.
+	var b strings.Builder
+	started := false
+	pendingBlanks := 0
+	prevExtra := false
+	for _, cl := range lines {
+		if cl.blank {
+			if started {
+				pendingBlanks++
+			}
+			continue
+		}
+		if started {
+			switch {
+			case style == '|':
+				b.WriteString(strings.Repeat("\n", pendingBlanks+1))
+			case pendingBlanks > 0:
+				b.WriteString(strings.Repeat("\n", pendingBlanks))
+			case cl.extra || prevExtra:
+				b.WriteByte('\n')
+			default:
+				b.WriteByte(' ')
+			}
+		}
+		b.WriteString(cl.text)
+		started = true
+		pendingBlanks = 0
+		prevExtra = cl.extra
+	}
+
+	switch chomp {
+	case '-':
+	case '+':
+		n := trailingBlanks
+		if hasContent {
+			n++
+		}
+		b.WriteString(strings.Repeat("\n", n))
+	default:
+		if hasContent {
+			b.WriteByte('\n')
+		}
+	}
+
+	return b.String(), i, nil
 }
 
 // stripComment removes a trailing " # ..." comment, ignoring '#' that
@@ -103,7 +255,8 @@ func parseNode(tokens []line, pos int, indent int) (Node, int, error) {
 func parseSequence(tokens []line, pos int, indent int) (Node, int, error) {
 	items := []Node{}
 	for pos < len(tokens) && tokens[pos].indent == indent && isSeqItem(tokens[pos].text) {
-		rest := strings.TrimSpace(strings.TrimPrefix(tokens[pos].text, "-"))
+		tok := tokens[pos]
+		rest := strings.TrimSpace(strings.TrimPrefix(tok.text, "-"))
 		if rest == "" {
 			if pos+1 < len(tokens) && tokens[pos+1].indent > indent {
 				val, newPos, err := parseNode(tokens, pos+1, tokens[pos+1].indent)
@@ -123,8 +276,8 @@ func parseSequence(tokens []line, pos int, indent int) (Node, int, error) {
 			// item line, indented to wherever it sits after "- ". Splice a
 			// synthetic line in its place so parseMapping can walk the rest
 			// of the item's keys, which are indented to match.
-			itemIndent := indent + (len(tokens[pos].text) - len(rest))
-			synthetic := line{indent: itemIndent, text: rest, num: tokens[pos].num}
+			itemIndent := indent + (len(tok.text) - len(rest))
+			synthetic := line{indent: itemIndent, text: rest, num: tok.num, block: tok.block}
 			combined := append([]line{synthetic}, tokens[pos+1:]...)
 			val, newPos, err := parseMapping(combined, 0, itemIndent)
 			if err != nil {
@@ -134,9 +287,14 @@ func parseSequence(tokens []line, pos int, indent int) (Node, int, error) {
 			pos += newPos
 			continue
 		}
+		if tok.block != nil {
+			items = append(items, *tok.block)
+			pos++
+			continue
+		}
 		val, err := parseScalar(rest)
 		if err != nil {
-			return nil, pos, fmt.Errorf("line %d: %v", tokens[pos].num, err)
+			return nil, pos, fmt.Errorf("line %d: %v", tok.num, err)
 		}
 		items = append(items, val)
 		pos++
@@ -147,12 +305,16 @@ func parseSequence(tokens []line, pos int, indent int) (Node, int, error) {
 func parseMapping(tokens []line, pos int, indent int) (Node, int, error) {
 	m := map[string]Node{}
 	for pos < len(tokens) && tokens[pos].indent == indent && !isSeqItem(tokens[pos].text) {
-		key, valText, hasValue, err := splitKeyValue(tokens[pos].text)
+		tok := tokens[pos]
+		key, valText, hasValue, err := splitKeyValue(tok.text)
 		if err != nil {
-			return nil, pos, fmt.Errorf("line %d: %v", tokens[pos].num, err)
+			return nil, pos, fmt.Errorf("line %d: %v", tok.num, err)
 		}
-		lineNum := tokens[pos].num
 		pos++
+		if tok.block != nil {
+			m[key] = *tok.block
+			continue
+		}
 		if !hasValue || valText == "" {
 			if pos < len(tokens) && tokens[pos].indent > indent {
 				val, newPos, err := parseNode(tokens, pos, tokens[pos].indent)
@@ -168,7 +330,7 @@ func parseMapping(tokens []line, pos int, indent int) (Node, int, error) {
 		}
 		val, err := parseScalar(valText)
 		if err != nil {
-			return nil, pos, fmt.Errorf("line %d: %v", lineNum, err)
+			return nil, pos, fmt.Errorf("line %d: %v", tok.num, err)
 		}
 		m[key] = val
 	}
