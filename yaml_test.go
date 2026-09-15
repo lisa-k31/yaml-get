@@ -308,6 +308,190 @@ func TestNotFoundError(t *testing.T) {
 	}
 }
 
+func setValue(yamlSrc, path, newValue string) (string, error) {
+	segs, err := ParsePath(path)
+	if err != nil {
+		return "", err
+	}
+	return Set(yamlSrc, segs, newValue)
+}
+
+func TestSet(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		path    string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "replace a plain scalar",
+			yaml:  "name: old\nport: 8080\n",
+			path:  "name",
+			value: "new",
+			want:  "name: new\nport: 8080\n",
+		},
+		{
+			name:  "replace preserves indentation and sibling lines",
+			yaml:  "server:\n  host: localhost\n  port: 8080\n",
+			path:  "server.port",
+			value: "9090",
+			want:  "server:\n  host: localhost\n  port: 9090\n",
+		},
+		{
+			name:  "replace preserves a comment on another line",
+			yaml:  "name: old # keep me\nport: 8080\n",
+			path:  "port",
+			value: "9090",
+			want:  "name: old # keep me\nport: 9090\n",
+		},
+		{
+			name:  "drops the comment on the edited line itself",
+			yaml:  "port: 8080 # default\n",
+			path:  "port",
+			value: "9090",
+			want:  "port: 9090\n",
+		},
+		{
+			name:  "bare value that needs quoting gets quoted",
+			yaml:  "msg: old\n",
+			path:  "msg",
+			value: "has a # in it",
+			want:  "msg: \"has a # in it\"\n",
+		},
+		{
+			name:  "value with leading or trailing space gets quoted",
+			yaml:  "msg: old\n",
+			path:  "msg",
+			value: " padded ",
+			want:  "msg: \" padded \"\n",
+		},
+		{
+			name:  "value that looks like a block header gets quoted",
+			yaml:  "msg: old\n",
+			path:  "msg",
+			value: "|",
+			want:  "msg: \"|\"\n",
+		},
+		{
+			name:  "already-quoted value is passed through as-is",
+			yaml:  "msg: old\n",
+			path:  "msg",
+			value: `"literal true"`,
+			want:  "msg: \"literal true\"\n",
+		},
+		{
+			name:  "bare bool and int values stay unquoted",
+			yaml:  "enabled: false\ncount: 1\n",
+			path:  "enabled",
+			value: "true",
+			want:  "enabled: true\ncount: 1\n",
+		},
+		{
+			name:  "empty value clears the key to null",
+			yaml:  "debug: yes\n",
+			path:  "debug",
+			value: "",
+			want:  "debug:\n",
+		},
+		{
+			name:  "set on a null value fills it in",
+			yaml:  "debug:\nother: 1\n",
+			path:  "debug",
+			value: "true",
+			want:  "debug: true\nother: 1\n",
+		},
+		{
+			name:  "crlf line endings are preserved",
+			yaml:  "name: old\r\nport: 80\r\n",
+			path:  "name",
+			value: "new",
+			want:  "name: new\r\nport: 80\r\n",
+		},
+		{
+			name:    "missing key is an error",
+			yaml:    "name: value\n",
+			path:    "missing",
+			value:   "x",
+			wantErr: true,
+		},
+		{
+			name:    "cannot set a mapping",
+			yaml:    "server:\n  host: localhost\n",
+			path:    "server",
+			value:   "x",
+			wantErr: true,
+		},
+		{
+			name:    "cannot descend into a scalar",
+			yaml:    "name: value\n",
+			path:    "name.sub",
+			value:   "x",
+			wantErr: true,
+		},
+		{
+			name:    "indexing is not supported",
+			yaml:    "colors:\n  - red\n  - green\n",
+			path:    "colors[0]",
+			value:   "x",
+			wantErr: true,
+		},
+		{
+			name:    "path through a list is not supported",
+			yaml:    "items:\n  - name: a\n",
+			path:    "items.name",
+			value:   "x",
+			wantErr: true,
+		},
+		{
+			name:    "cannot rewrite a block scalar",
+			yaml:    "msg: |\n  line one\n",
+			path:    "msg",
+			value:   "x",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := setValue(tc.yaml, tc.path, tc.value)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetRoundTrip checks that the result of Set still parses, and that
+// looking the path back up returns what was just written.
+func TestSetRoundTrip(t *testing.T) {
+	src := "server:\n  host: localhost\n  port: 8080\n# a comment\ntags:\n  - a\n  - b\n"
+	newSrc, err := setValue(src, "server.host", "example.com")
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, err := lookupValue(newSrc, "server.host")
+	if err != nil {
+		t.Fatalf("lookup after set: %v", err)
+	}
+	if got != "example.com" {
+		t.Errorf("got %q, want %q", got, "example.com")
+	}
+	if port, err := lookupValue(newSrc, "server.port"); err != nil || fmt.Sprint(port) != "8080" {
+		t.Errorf("unrelated key server.port changed: %v, %v", port, err)
+	}
+}
+
 func TestParsePathErrors(t *testing.T) {
 	cases := []struct {
 		name string

@@ -44,6 +44,30 @@ $ yaml-get -f config.yaml -d 9090 server.missing
 `-d` only kicks in when the path doesn't resolve. It does not suppress
 errors from a malformed file or from indexing into a scalar.
 
+## Writing values
+
+Pass `-set` to write a value into the file instead of printing one, e.g. to
+bump a version in a CI release step:
+
+```
+$ yaml-get -f config.yaml -set 9090 server.port
+$ yaml-get -f config.yaml server.port
+9090
+```
+
+`-set` requires `-f`; it rewrites the file in place, touching only the one
+line that holds the target value and leaving every other line - including
+comments and key order - exactly as it was. It only supports paths made of
+mapping keys: it can't set a value reached through a `[N]` index, and it
+won't overwrite an existing block (`|`/`>`) scalar or a mapping/list.
+
+The value is written as a raw YAML scalar, the same rules used when
+reading one back: `-set true` writes a bare boolean, `-set ''` clears the
+key to `null`, and a value that wouldn't survive being written bare (it
+has leading/trailing space, contains an unquoted `#`, or starts with `|`
+or `>`) is quoted automatically. To force a string, quote it yourself:
+`-set '"true"'` writes the literal three-character string, not a boolean.
+
 ## Path syntax
 
 Paths are dot-separated keys. Use `key[N]` to index into a list. A literal

@@ -16,16 +16,22 @@ func main() {
 	var defaultVal string
 	flag.StringVar(&defaultVal, "d", "", "value to print if the path is not found, instead of exiting non-zero")
 	flag.StringVar(&defaultVal, "default", "", "same as -d")
+	setVal := flag.String("set", "", "write this value at <path> instead of printing it (requires -f; overwrites the file)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: yaml-get [-f file] [-d default] <path>")
+		fmt.Fprintln(os.Stderr, "       yaml-get [-f file] -set value <path>")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
 	haveDefault := false
+	haveSet := false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "d" || f.Name == "default" {
+		switch f.Name {
+		case "d", "default":
 			haveDefault = true
+		case "set":
+			haveSet = true
 		}
 	})
 
@@ -36,8 +42,18 @@ func main() {
 	}
 	path := args[0]
 
+	segs, err := ParsePath(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "yaml-get: %v\n", err)
+		os.Exit(1)
+	}
+
+	if haveSet && (*file == "" || *file == "-") {
+		fmt.Fprintln(os.Stderr, "yaml-get: -set requires -f <file>")
+		os.Exit(1)
+	}
+
 	var src []byte
-	var err error
 	if *file == "" || *file == "-" {
 		src, err = io.ReadAll(os.Stdin)
 	} else {
@@ -48,13 +64,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	root, err := Parse(string(src))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "yaml-get: %v\n", err)
-		os.Exit(1)
+	if haveSet {
+		newSrc, err := Set(string(src), segs, *setVal)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "yaml-get: %v\n", err)
+			os.Exit(2)
+		}
+		perm := os.FileMode(0644)
+		if info, statErr := os.Stat(*file); statErr == nil {
+			perm = info.Mode().Perm()
+		}
+		if err := os.WriteFile(*file, []byte(newSrc), perm); err != nil {
+			fmt.Fprintf(os.Stderr, "yaml-get: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
-	segs, err := ParsePath(path)
+	root, err := Parse(string(src))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "yaml-get: %v\n", err)
 		os.Exit(1)

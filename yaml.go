@@ -498,6 +498,172 @@ type NotFoundError struct {
 
 func (e *NotFoundError) Error() string { return e.msg }
 
+// Set returns src with the value at segs replaced by newValue, rewriting
+// only that one line and leaving everything else - formatting, comments,
+// key order, block scalars elsewhere in the file - untouched. It only
+// supports mapping paths: a segment with an index, or a path that runs
+// through a sequence, is reported as an error rather than guessed at,
+// since rewriting inside a sequence item safely needs more of the item's
+// structure than a single line carries.
+//
+// newValue is taken as a raw YAML scalar, the same way a value read out of
+// the file would be: "true" writes a bare boolean, "" clears the key to
+// null, and a value already wrapped in matching quotes is passed through
+// as the caller's own quoted scalar. Anything else that would not survive
+// being written bare - leading/trailing space, an embedded "#" comment, a
+// stray "|"/">" at the start - is double-quoted automatically.
+func Set(src string, segs []Segment, newValue string) (string, error) {
+	if len(segs) == 0 {
+		return "", fmt.Errorf("empty path")
+	}
+	tokens, err := tokenize(src)
+	if err != nil {
+		return "", err
+	}
+	if len(tokens) == 0 {
+		return "", &NotFoundError{msg: fmt.Sprintf("key %q not found", segs[0].Key)}
+	}
+	tok, err := locateScalar(tokens, 0, tokens[0].indent, segs)
+	if err != nil {
+		return "", err
+	}
+
+	key, _, _, err := splitKeyValue(tok.text)
+	if err != nil {
+		return "", fmt.Errorf("line %d: %v", tok.num, err)
+	}
+	val := formatSetValue(key, newValue)
+
+	newLine := strings.Repeat(" ", tok.indent) + key + ":"
+	if val != "" {
+		newLine += " " + val
+	}
+
+	rawLines := strings.Split(src, "\n")
+	if tok.num-1 >= len(rawLines) {
+		return "", fmt.Errorf("line %d: out of range", tok.num)
+	}
+	if strings.HasSuffix(rawLines[tok.num-1], "\r") {
+		newLine += "\r"
+	}
+	rawLines[tok.num-1] = newLine
+	return strings.Join(rawLines, "\n"), nil
+}
+
+// locateScalar walks the mapping structure the same way parseMapping does,
+// following segs, and returns the token holding the final scalar so Set
+// can rewrite its value in place. Non-matching keys have their subtree
+// skipped by advancing past every token indented deeper than they are,
+// without needing to parse it.
+func locateScalar(tokens []line, pos, indent int, segs []Segment) (*line, error) {
+	seg := segs[0]
+	if seg.HasIndex {
+		return nil, fmt.Errorf("--set does not support indexing into a list (%q)", seg.Key)
+	}
+	if pos >= len(tokens) || tokens[pos].indent != indent {
+		return nil, &NotFoundError{msg: fmt.Sprintf("key %q not found", seg.Key)}
+	}
+	if isSeqItem(tokens[pos].text) {
+		return nil, fmt.Errorf("cannot look up key %q: value is not a mapping", seg.Key)
+	}
+	for pos < len(tokens) && tokens[pos].indent == indent && !isSeqItem(tokens[pos].text) {
+		tok := &tokens[pos]
+		key, valText, hasValue, err := splitKeyValue(tok.text)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %v", tok.num, err)
+		}
+		if key != seg.Key {
+			pos++
+			for pos < len(tokens) && tokens[pos].indent > indent {
+				pos++
+			}
+			continue
+		}
+		if len(segs) == 1 {
+			if tok.block != nil {
+				return nil, fmt.Errorf("line %d: --set does not support rewriting a block scalar", tok.num)
+			}
+			if (!hasValue || valText == "") && pos+1 < len(tokens) && tokens[pos+1].indent > indent {
+				return nil, fmt.Errorf("line %d: %q is a mapping or list, not a scalar", tok.num, seg.Key)
+			}
+			return tok, nil
+		}
+		if tok.block != nil || (hasValue && valText != "") {
+			return nil, fmt.Errorf("cannot look up key %q: value is not a mapping", segs[1].Key)
+		}
+		if pos+1 >= len(tokens) || tokens[pos+1].indent <= indent {
+			return nil, &NotFoundError{msg: fmt.Sprintf("key %q not found", segs[1].Key)}
+		}
+		if isSeqItem(tokens[pos+1].text) {
+			return nil, fmt.Errorf("--set does not support paths through a list")
+		}
+		return locateScalar(tokens, pos+1, tokens[pos+1].indent, segs[1:])
+	}
+	return nil, &NotFoundError{msg: fmt.Sprintf("key %q not found", seg.Key)}
+}
+
+// formatSetValue turns a raw --set value into the text that goes after
+// "key: " in the rewritten line.
+func formatSetValue(key, v string) string {
+	if v == "" {
+		return ""
+	}
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		return v
+	}
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+		return v
+	}
+	if needsQuoting(key, v) {
+		return quoteDouble(v)
+	}
+	return v
+}
+
+// needsQuoting reports whether v would fail to round-trip if written bare
+// as the value of key: reading the resulting line back through tokenize
+// and splitKeyValue would either trim it, truncate it at a "#", or
+// misread it as a block scalar header.
+func needsQuoting(key, v string) bool {
+	if v != strings.TrimSpace(v) {
+		return true
+	}
+	if strings.ContainsAny(v, "\n\r") {
+		return true
+	}
+	candidate := key + ": " + v
+	if stripComment(candidate) != candidate {
+		return true
+	}
+	if _, _, _, ok := blockScalarIndicator(candidate); ok {
+		return true
+	}
+	return false
+}
+
+func quoteDouble(v string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range v {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
 // Lookup walks root following segs and returns the value found there.
 func Lookup(root Node, segs []Segment) (Node, error) {
 	cur := root
