@@ -57,9 +57,16 @@ $ yaml-get -f config.yaml server.port
 
 `-set` requires `-f`; it rewrites the file in place, touching only the one
 line that holds the target value and leaving every other line - including
-comments and key order - exactly as it was. It only supports paths made of
-mapping keys: it can't set a value reached through a `[N]` index, and it
-won't overwrite an existing block (`|`/`>`) scalar or a mapping/list.
+comments and key order - exactly as it was. A path may use a `[N]` index to
+reach into a sequence of scalars or of mappings, same as when reading a
+value back. It won't overwrite an existing block (`|`/`>`) scalar, or a
+mapping/list reached without a final index to pick a scalar out of it:
+
+```
+$ yaml-get -f config.yaml -set east server.tags[1]
+$ yaml-get -f config.yaml server.tags[1]
+east
+```
 
 The value is written as a raw YAML scalar, the same rules used when
 reading one back: `-set true` writes a bare boolean, `-set ''` clears the

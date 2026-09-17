@@ -500,14 +500,14 @@ func (e *NotFoundError) Error() string { return e.msg }
 
 // Set returns src with the value at segs replaced by newValue, rewriting
 // only that one line and leaving everything else - formatting, comments,
-// key order, block scalars elsewhere in the file - untouched. It only
-// supports mapping paths: a segment with an index, or a path that runs
-// through a sequence, is reported as an error rather than guessed at,
-// since rewriting inside a sequence item safely needs more of the item's
-// structure than a single line carries.
+// key order, block scalars elsewhere in the file - untouched. A path
+// segment may index into a sequence of scalars or of mappings, either as
+// the final step or partway through the path; a block scalar or a
+// sequence reached without an index (as a whole value or as a step with
+// no index to descend by) is reported as an error rather than guessed at.
 //
 // newValue is taken as a raw YAML scalar, the same way a value read out of
-// the file would be: "true" writes a bare boolean, "" clears the key to
+// the file would be: "true" writes a bare boolean, "" clears the value to
 // null, and a value already wrapped in matching quotes is passed through
 // as the caller's own quoted scalar. Anything else that would not survive
 // being written bare - leading/trailing space, an embedded "#" comment, a
@@ -523,43 +523,45 @@ func Set(src string, segs []Segment, newValue string) (string, error) {
 	if len(tokens) == 0 {
 		return "", &NotFoundError{msg: fmt.Sprintf("key %q not found", segs[0].Key)}
 	}
-	tok, err := locateScalar(tokens, 0, tokens[0].indent, segs)
+	target, err := locateScalar(tokens, 0, tokens[0].indent, segs)
 	if err != nil {
 		return "", err
 	}
 
-	key, _, _, err := splitKeyValue(tok.text)
-	if err != nil {
-		return "", fmt.Errorf("line %d: %v", tok.num, err)
-	}
-	val := formatSetValue(key, newValue)
-
-	newLine := strings.Repeat(" ", tok.indent) + key + ":"
+	val := formatSetValue(target.prefix, newValue)
+	newLine := strings.Repeat(" ", target.indent) + target.prefix
 	if val != "" {
 		newLine += " " + val
 	}
 
 	rawLines := strings.Split(src, "\n")
-	if tok.num-1 >= len(rawLines) {
-		return "", fmt.Errorf("line %d: out of range", tok.num)
+	if target.tok.num-1 >= len(rawLines) {
+		return "", fmt.Errorf("line %d: out of range", target.tok.num)
 	}
-	if strings.HasSuffix(rawLines[tok.num-1], "\r") {
+	if strings.HasSuffix(rawLines[target.tok.num-1], "\r") {
 		newLine += "\r"
 	}
-	rawLines[tok.num-1] = newLine
+	rawLines[target.tok.num-1] = newLine
 	return strings.Join(rawLines, "\n"), nil
 }
 
+// scalarTarget identifies the single source line Set will rewrite: the
+// token that currently holds the value, the indentation to write the new
+// line at, and the text that precedes the value on that line ("key:" for
+// a mapping entry, "-" for a sequence item).
+type scalarTarget struct {
+	tok    *line
+	indent int
+	prefix string
+}
+
 // locateScalar walks the mapping structure the same way parseMapping does,
-// following segs, and returns the token holding the final scalar so Set
-// can rewrite its value in place. Non-matching keys have their subtree
-// skipped by advancing past every token indented deeper than they are,
-// without needing to parse it.
-func locateScalar(tokens []line, pos, indent int, segs []Segment) (*line, error) {
+// following segs, and returns the target Set should rewrite. Non-matching
+// keys have their subtree skipped by advancing past every token indented
+// deeper than they are, without needing to parse it.
+func locateScalar(tokens []line, pos, indent int, segs []Segment) (*scalarTarget, error) {
 	seg := segs[0]
-	if seg.HasIndex {
-		return nil, fmt.Errorf("--set does not support indexing into a list (%q)", seg.Key)
-	}
+	rest := segs[1:]
 	if pos >= len(tokens) || tokens[pos].indent != indent {
 		return nil, &NotFoundError{msg: fmt.Sprintf("key %q not found", seg.Key)}
 	}
@@ -579,32 +581,112 @@ func locateScalar(tokens []line, pos, indent int, segs []Segment) (*line, error)
 			}
 			continue
 		}
-		if len(segs) == 1 {
+		hasChildren := pos+1 < len(tokens) && tokens[pos+1].indent > indent
+		if seg.HasIndex {
+			if tok.block != nil || (hasValue && valText != "") || !hasChildren || !isSeqItem(tokens[pos+1].text) {
+				return nil, fmt.Errorf("cannot index %q: value is not a list", seg.Key)
+			}
+			return locateSeqScalar(tokens, pos+1, tokens[pos+1].indent, seg, rest)
+		}
+		if len(rest) == 0 {
 			if tok.block != nil {
 				return nil, fmt.Errorf("line %d: --set does not support rewriting a block scalar", tok.num)
 			}
-			if (!hasValue || valText == "") && pos+1 < len(tokens) && tokens[pos+1].indent > indent {
+			if (!hasValue || valText == "") && hasChildren {
 				return nil, fmt.Errorf("line %d: %q is a mapping or list, not a scalar", tok.num, seg.Key)
 			}
-			return tok, nil
+			return &scalarTarget{tok: tok, indent: indent, prefix: key + ":"}, nil
 		}
 		if tok.block != nil || (hasValue && valText != "") {
-			return nil, fmt.Errorf("cannot look up key %q: value is not a mapping", segs[1].Key)
+			return nil, fmt.Errorf("cannot look up key %q: value is not a mapping", rest[0].Key)
 		}
-		if pos+1 >= len(tokens) || tokens[pos+1].indent <= indent {
-			return nil, &NotFoundError{msg: fmt.Sprintf("key %q not found", segs[1].Key)}
+		if !hasChildren {
+			return nil, &NotFoundError{msg: fmt.Sprintf("key %q not found", rest[0].Key)}
 		}
 		if isSeqItem(tokens[pos+1].text) {
 			return nil, fmt.Errorf("--set does not support paths through a list")
 		}
-		return locateScalar(tokens, pos+1, tokens[pos+1].indent, segs[1:])
+		return locateScalar(tokens, pos+1, tokens[pos+1].indent, rest)
 	}
 	return nil, &NotFoundError{msg: fmt.Sprintf("key %q not found", seg.Key)}
 }
 
+// locateSeqScalar walks a sequence the same way parseSequence does,
+// looking for item number seg.Index, and hands it to resolveSeqItem once
+// found. Sibling items are skipped over by jumping past every token
+// indented deeper than the sequence itself, the same trick locateScalar
+// uses for mapping keys.
+func locateSeqScalar(tokens []line, pos, indent int, seg Segment, rest []Segment) (*scalarTarget, error) {
+	idx := 0
+	for pos < len(tokens) && tokens[pos].indent == indent && isSeqItem(tokens[pos].text) {
+		tok := &tokens[pos]
+		itemEnd := pos + 1
+		for itemEnd < len(tokens) && tokens[itemEnd].indent > indent {
+			itemEnd++
+		}
+		if idx == seg.Index {
+			itemText := strings.TrimSpace(strings.TrimPrefix(tok.text, "-"))
+			return resolveSeqItem(tokens, pos, indent, tok, itemText, rest)
+		}
+		idx++
+		pos = itemEnd
+	}
+	return nil, &NotFoundError{msg: fmt.Sprintf("index %d out of range for %q (len %d)", seg.Index, seg.Key, idx)}
+}
+
+// resolveSeqItem turns the sequence item at tokens[pos] (dash line tok,
+// with the text after "- " already trimmed into itemText) into a
+// scalarTarget, or descends into it as a mapping if rest still has
+// segments left to follow.
+func resolveSeqItem(tokens []line, pos, indent int, tok *line, itemText string, rest []Segment) (*scalarTarget, error) {
+	hasChildren := pos+1 < len(tokens) && tokens[pos+1].indent > indent
+
+	if itemText == "" {
+		if !hasChildren {
+			if len(rest) != 0 {
+				return nil, fmt.Errorf("cannot look up key %q: value is not a mapping", rest[0].Key)
+			}
+			return &scalarTarget{tok: tok, indent: indent, prefix: "-"}, nil
+		}
+		if len(rest) == 0 {
+			return nil, fmt.Errorf("line %d: value is a mapping or list, not a scalar", tok.num)
+		}
+		if isSeqItem(tokens[pos+1].text) {
+			return nil, fmt.Errorf("--set does not support paths through a list")
+		}
+		return locateScalar(tokens, pos+1, tokens[pos+1].indent, rest)
+	}
+
+	// "- key: value" opens a mapping whose first key lives on the item
+	// line; splice a synthetic line in its place the same way
+	// parseSequence does, so a block scalar on that first key (tok.block)
+	// carries over correctly.
+	if _, _, hasValue, err := splitKeyValue(itemText); err == nil && hasValue {
+		if len(rest) == 0 {
+			return nil, fmt.Errorf("line %d: value is a mapping, not a scalar", tok.num)
+		}
+		itemIndent := indent + (len(tok.text) - len(itemText))
+		synthetic := line{indent: itemIndent, text: itemText, num: tok.num, block: tok.block}
+		combined := append([]line{synthetic}, tokens[pos+1:]...)
+		return locateScalar(combined, 0, itemIndent, rest)
+	}
+
+	if tok.block != nil {
+		if len(rest) == 0 {
+			return nil, fmt.Errorf("line %d: --set does not support rewriting a block scalar", tok.num)
+		}
+		return nil, fmt.Errorf("cannot look up key %q: value is not a mapping", rest[0].Key)
+	}
+
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("cannot look up key %q: value is not a mapping", rest[0].Key)
+	}
+	return &scalarTarget{tok: tok, indent: indent, prefix: "-"}, nil
+}
+
 // formatSetValue turns a raw --set value into the text that goes after
-// "key: " in the rewritten line.
-func formatSetValue(key, v string) string {
+// prefix (e.g. "key:" or "-") in the rewritten line.
+func formatSetValue(prefix, v string) string {
 	if v == "" {
 		return ""
 	}
@@ -614,24 +696,24 @@ func formatSetValue(key, v string) string {
 	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
 		return v
 	}
-	if needsQuoting(key, v) {
+	if needsQuoting(prefix, v) {
 		return quoteDouble(v)
 	}
 	return v
 }
 
 // needsQuoting reports whether v would fail to round-trip if written bare
-// as the value of key: reading the resulting line back through tokenize
-// and splitKeyValue would either trim it, truncate it at a "#", or
-// misread it as a block scalar header.
-func needsQuoting(key, v string) bool {
+// after prefix: reading the resulting line back through tokenize and
+// splitKeyValue (or isSeqItem) would either trim it, truncate it at a
+// "#", or misread it as a block scalar header.
+func needsQuoting(prefix, v string) bool {
 	if v != strings.TrimSpace(v) {
 		return true
 	}
 	if strings.ContainsAny(v, "\n\r") {
 		return true
 	}
-	candidate := key + ": " + v
+	candidate := prefix + " " + v
 	if stripComment(candidate) != candidate {
 		return true
 	}
