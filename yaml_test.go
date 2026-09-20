@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -553,6 +554,63 @@ func TestSetRoundTrip(t *testing.T) {
 	if port, err := lookupValue(newSrc, "server.port"); err != nil || fmt.Sprint(port) != "8080" {
 		t.Errorf("unrelated key server.port changed: %v, %v", port, err)
 	}
+}
+
+// FuzzTokenize feeds tokenize (and, transitively through Parse, the rest
+// of the parser) arbitrary input and checks it never panics and never
+// hands back a malformed token stream, rather than checking any specific
+// output. tokenize is the layer that does its own byte-by-byte scanning
+// (quote state, block scalar indentation math) instead of leaning on
+// strconv or similar, so it's the part most likely to have an off-by-one
+// that only shows up on unusual input.
+func FuzzTokenize(f *testing.F) {
+	seeds := []string{
+		"",
+		"key: value\n",
+		"key:\n  nested: 1\n",
+		"- a\n- b\n",
+		"- - a\n",
+		"msg: |\n  line\n",
+		"msg: |2\n    x\n",
+		"msg: |99\n  x\n",
+		"msg: >-\n  x\n",
+		"bad: \"unterminated\n",
+		"key: 'unterminated\n",
+		"\tindented with tab\n",
+		"key: value # comment\n",
+		"key: \"quoted # not comment\" # real comment\n",
+		":\n",
+		"-\n",
+		"- \n",
+		"a.b: 1\n",
+		"- |+\n",
+		"key: |\r\n  a\r\n",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, src string) {
+		tokens, err := tokenize(src)
+		if err != nil {
+			return
+		}
+		prevNum := 0
+		for _, tok := range tokens {
+			if tok.indent < 0 {
+				t.Fatalf("negative indent: %+v", tok)
+			}
+			if tok.num <= prevNum {
+				t.Fatalf("line numbers not strictly increasing: %+v", tok)
+			}
+			prevNum = tok.num
+			if strings.TrimSpace(tok.text) == "" {
+				t.Fatalf("blank token text: %+v", tok)
+			}
+		}
+		// Parse must never panic on a stream tokenize was willing to
+		// produce, whatever it makes of it.
+		Parse(src)
+	})
 }
 
 func TestParsePathErrors(t *testing.T) {
