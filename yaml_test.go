@@ -613,6 +613,59 @@ func FuzzTokenize(f *testing.F) {
 	})
 }
 
+// FuzzParsePath feeds ParsePath arbitrary strings and checks it never
+// panics, and that whatever it does accept satisfies the invariants the
+// rest of the package assumes: a non-empty key per segment, and a
+// non-negative index whenever HasIndex is set. It's a separate fuzz target
+// from FuzzTokenize because ParsePath's escaping and bracket-parsing logic
+// doesn't share any code with the tokenizer's line-based scanning.
+func FuzzParsePath(f *testing.F) {
+	seeds := []string{
+		"",
+		"a",
+		"a.b",
+		"a.b.c",
+		`a\.b`,
+		`a\\b`,
+		"a[0]",
+		"a[0].b[1]",
+		"a.",
+		".a",
+		"a..b",
+		"a[",
+		"a]",
+		"[0]",
+		"a[-1]",
+		"a[01]",
+		"a[abc]",
+		"a[999999999999999999999]",
+		`a\`,
+		"héllo.wörld",
+		"a[0",
+		"a0]",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, path string) {
+		segs, err := ParsePath(path)
+		if err != nil {
+			return
+		}
+		if len(segs) == 0 {
+			t.Fatalf("no error but no segments for %q", path)
+		}
+		for _, seg := range segs {
+			if seg.Key == "" {
+				t.Fatalf("empty key in segment for %q: %+v", path, seg)
+			}
+			if seg.HasIndex && seg.Index < 0 {
+				t.Fatalf("negative index in segment for %q: %+v", path, seg)
+			}
+		}
+	})
+}
+
 func TestParsePathErrors(t *testing.T) {
 	cases := []struct {
 		name string
