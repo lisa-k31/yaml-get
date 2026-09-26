@@ -255,6 +255,42 @@ func TestParseAndLookup(t *testing.T) {
 			path: "items[0].text",
 			want: "hello\nworld\n",
 		},
+		{
+			name:    "flow mapping value is a parse error, not a string",
+			yaml:    "a: {b: 1}\n",
+			path:    "a",
+			wantErr: true,
+		},
+		{
+			name:    "flow sequence value is a parse error, not a string",
+			yaml:    "a: [1, 2]\n",
+			path:    "a",
+			wantErr: true,
+		},
+		{
+			name:    "flow sequence as a list item is a parse error",
+			yaml:    "list:\n  - [1, 2]\n",
+			path:    "list[0]",
+			wantErr: true,
+		},
+		{
+			name:    "anchor is a parse error, not a string",
+			yaml:    "a: &x value\n",
+			path:    "a",
+			wantErr: true,
+		},
+		{
+			name:    "alias is a parse error, not a string",
+			yaml:    "a: *x\n",
+			path:    "a",
+			wantErr: true,
+		},
+		{
+			name: "quoted value that merely starts with a flow indicator is a string",
+			yaml: `a: "{b: 1}"` + "\n",
+			path: "a",
+			want: "{b: 1}",
+		},
 	}
 
 	for _, tc := range cases {
