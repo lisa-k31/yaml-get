@@ -286,6 +286,36 @@ func TestParseAndLookup(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "whole-line flow mapping at top level is a parse error",
+			yaml:    "{a: 1}\n",
+			path:    "a",
+			wantErr: true,
+		},
+		{
+			name:    "whole-line flow mapping nested under a key is a parse error",
+			yaml:    "outer:\n  {a: 1}\nother: 2\n",
+			path:    "other",
+			wantErr: true,
+		},
+		{
+			name:    "flow mapping as a list item is a parse error",
+			yaml:    "list:\n  - {a: 1}\n",
+			path:    "list[0].a",
+			wantErr: true,
+		},
+		{
+			name:    "anchored key is a parse error",
+			yaml:    "&x a: 1\nb: 2\n",
+			path:    "b",
+			wantErr: true,
+		},
+		{
+			name:    "anchored mapping item in a list is a parse error",
+			yaml:    "list:\n  - &x a: 1\n",
+			path:    "list[0].a",
+			wantErr: true,
+		},
+		{
 			name: "quoted value that merely starts with a flow indicator is a string",
 			yaml: `a: "{b: 1}"` + "\n",
 			path: "a",

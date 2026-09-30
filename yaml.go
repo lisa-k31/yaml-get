@@ -60,6 +60,9 @@ func tokenize(src string) ([]line, error) {
 		}
 		indent := len(leadWS)
 		lineNum := i + 1
+		if err := checkLineStart(content); err != nil {
+			return nil, fmt.Errorf("line %d: %v", lineNum, err)
+		}
 
 		if style, chomp, indentHint, ok := blockScalarIndicator(content); ok {
 			text, next, err := readBlockScalar(raw, i+1, indent, style, chomp, indentHint)
@@ -367,6 +370,32 @@ func splitKeyValue(s string) (key string, val string, hasValue bool, err error) 
 	return "", "", false, fmt.Errorf("expected \"key: value\", got %q", s)
 }
 
+// rejectUnsupportedStart reports an error if s begins with a flow
+// indicator or an anchor/alias marker.
+func rejectUnsupportedStart(s string) error {
+	if s == "" {
+		return nil
+	}
+	switch s[0] {
+	case '{', '[':
+		return fmt.Errorf("flow style is not supported: %q", s)
+	case '&', '*':
+		return fmt.Errorf("anchors and aliases are not supported: %q", s)
+	}
+	return nil
+}
+
+// checkLineStart applies rejectUnsupportedStart to what a line opens with
+// once any "- " prefixes are peeled off. Without this, a line such as
+// "{a: 1}" or "- &x k: v" splits on its first colon and yields a mapping
+// with a junk key like "{a" instead of an error.
+func checkLineStart(content string) error {
+	for isSeqItem(content) {
+		content = strings.TrimSpace(strings.TrimPrefix(content, "-"))
+	}
+	return rejectUnsupportedStart(content)
+}
+
 func parseScalar(s string) (Node, error) {
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		return unquoteDouble(s), nil
@@ -378,11 +407,8 @@ func parseScalar(s string) (Node, error) {
 	// ambiguous with flow style or an anchor/alias, so YAML reserves them.
 	// Rather than pass the raw text through as a string - a wrong answer
 	// that looks plausible - report the construct as unsupported.
-	if s != "" && (s[0] == '{' || s[0] == '[') {
-		return nil, fmt.Errorf("flow style is not supported: %q", s)
-	}
-	if s != "" && (s[0] == '&' || s[0] == '*') {
-		return nil, fmt.Errorf("anchors and aliases are not supported: %q", s)
+	if err := rejectUnsupportedStart(s); err != nil {
+		return nil, err
 	}
 	switch s {
 	case "~", "null", "Null", "NULL":
